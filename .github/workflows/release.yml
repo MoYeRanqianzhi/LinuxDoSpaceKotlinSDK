@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to release, for example v0.1.0-alpha.1
+        required: true
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: kotlin-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Release Artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: "8.10"
+
+      - name: Resolve metadata
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          release_tag="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            release_tag="${INPUT_TAG}"
+          fi
+          echo "release_tag=${release_tag}" >>"$GITHUB_OUTPUT"
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import pathlib
+          import re
+
+          text = pathlib.Path("build.gradle.kts").read_text(encoding="utf-8")
+          match = re.search(r'version\s*=\s*"([^"]+)"', text)
+          if match is None:
+            raise SystemExit("could not read Gradle version")
+          print(f"package_version={match.group(1)}")
+          PY
+
+      - name: Validate tag matches package version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          PACKAGE_VERSION: ${{ steps.meta.outputs.package_version }}
+        run: |
+          expected_tag="v${PACKAGE_VERSION}"
+          if [ "${RELEASE_TAG}" != "${expected_tag}" ]; then
+            echo "::error::Release tag ${RELEASE_TAG} does not match package version ${PACKAGE_VERSION}."
+            exit 1
+          fi
+
+      - name: Build package
+        run: gradle --no-daemon build
+
+      - name: Collect release artifacts
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          cp build/libs/* release-artifacts/
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-artifacts
+          path: release-artifacts/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: release-artifacts
+          path: release-artifacts
+
+      - name: Create or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" release-artifacts/* --clobber
+          else
+            gh release create "${RELEASE_TAG}" release-artifacts/* --generate-notes --title "${RELEASE_TAG}"
+          fi
