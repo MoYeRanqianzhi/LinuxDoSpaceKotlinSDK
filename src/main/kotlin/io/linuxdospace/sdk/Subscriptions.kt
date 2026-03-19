@@ -18,6 +18,7 @@ class ClientSubscription internal constructor(
 ) : AutoCloseable {
     private val queue = LinkedBlockingQueue<Any>()
     private val closed = AtomicBoolean(false)
+    private val active = AtomicBoolean(false)
 
     internal fun offer(item: Any) {
         queue.offer(item)
@@ -28,20 +29,24 @@ class ClientSubscription internal constructor(
         if (closed.get()) {
             return null
         }
-        val item = if (timeout.isZero) {
-            queue.poll()
-        } else {
-            queue.poll(timeout.toMillis(), TimeUnit.MILLISECONDS)
-        } ?: return null
-
-        if (item === QueueSignals.CLOSE) {
-            close()
-            return null
+        check(active.compareAndSet(false, true)) { "subscription already has an active consumer" }
+        try {
+            val item = if (timeout.isZero) {
+                queue.poll()
+            } else {
+                queue.poll(timeout.toMillis(), TimeUnit.MILLISECONDS)
+            } ?: return null
+            if (item === QueueSignals.CLOSE) {
+                close()
+                return null
+            }
+            if (item is LinuxDoSpaceException) {
+                throw item
+            }
+            return item as MailMessage
+        } finally {
+            active.set(false)
         }
-        if (item is LinuxDoSpaceException) {
-            throw item
-        }
-        return item as MailMessage
     }
 
     override fun close() {
@@ -82,21 +87,24 @@ class MailBox internal constructor(
         if (closed.get()) {
             return null
         }
-        active.set(true)
-        val item = if (timeout.isZero) {
-            queue.poll()
-        } else {
-            queue.poll(timeout.toMillis(), TimeUnit.MILLISECONDS)
-        } ?: return null
-
-        if (item === QueueSignals.CLOSE) {
-            close()
-            return null
+        check(active.compareAndSet(false, true)) { "mailbox already has an active listener" }
+        try {
+            val item = if (timeout.isZero) {
+                queue.poll()
+            } else {
+                queue.poll(timeout.toMillis(), TimeUnit.MILLISECONDS)
+            } ?: return null
+            if (item === QueueSignals.CLOSE) {
+                close()
+                return null
+            }
+            if (item is LinuxDoSpaceException) {
+                throw item
+            }
+            return item as MailMessage
+        } finally {
+            active.set(false)
         }
-        if (item is LinuxDoSpaceException) {
-            throw item
-        }
-        return item as MailMessage
     }
 
     internal fun matches(localPart: String): Boolean {

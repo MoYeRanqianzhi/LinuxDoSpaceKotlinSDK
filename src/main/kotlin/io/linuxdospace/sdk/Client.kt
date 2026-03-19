@@ -2,6 +2,7 @@ package io.linuxdospace.sdk
 
 import java.io.BufferedReader
 import java.io.ByteArrayInputStream
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.URI
 import java.net.http.HttpClient
@@ -40,6 +41,8 @@ class Client(
     private val initialReady = CountDownLatch(1)
     private var initialError: LinuxDoSpaceException? = null
     private var fatalError: LinuxDoSpaceException? = null
+    @Volatile
+    private var activeStream: InputStream? = null
 
     private val readerThread = Thread({ runLoop() }, "LinuxDoSpaceKotlinClient").apply {
         isDaemon = true
@@ -122,6 +125,14 @@ class Client(
             return
         }
         connected.set(false)
+        activeStream?.let { stream ->
+            activeStream = null
+            try {
+                stream.close()
+            } catch (_: Exception) {
+                // Best effort to unblock the reader thread.
+            }
+        }
         fullListeners.forEach { it.offer(QueueSignals.CLOSE) }
         synchronized(lock) {
             bindingsBySuffix.values.forEach { chain ->
@@ -203,14 +214,18 @@ class Client(
             connected.set(true)
             initialReady.countDown()
 
-            BufferedReader(InputStreamReader(response.body(), StandardCharsets.UTF_8)).use { reader ->
-                while (!closed.get()) {
-                    val line = reader.readLine() ?: break
-                    if (line.isBlank()) {
-                        continue
+            response.body().use { stream ->
+                activeStream = stream
+                BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8)).use { reader ->
+                    while (!closed.get()) {
+                        val line = reader.readLine() ?: break
+                        if (line.isBlank()) {
+                            continue
+                        }
+                        handleEventLine(line)
                     }
-                    handleEventLine(line)
                 }
+                activeStream = null
             }
         } catch (error: LinuxDoSpaceException) {
             throw error
