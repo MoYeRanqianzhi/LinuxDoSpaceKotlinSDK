@@ -10,6 +10,11 @@ This Kotlin SDK follows the same semantics as the Python and Java SDKs:
 - `allowOverlap=true` allows later matches
 - mailbox queue activates only when listening starts (no pre-listen backlog)
 
+Important:
+
+- `Suffix.LINUXDO_SPACE` is semantic, not literal
+- the SDK resolves it to `<owner_username>.linuxdo.space` after `ready.owner_username`
+
 ## Requirements
 
 - Kotlin 1.9+

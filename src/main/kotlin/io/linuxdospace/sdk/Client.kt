@@ -42,6 +42,8 @@ class Client(
     private var initialError: LinuxDoSpaceException? = null
     private var fatalError: LinuxDoSpaceException? = null
     @Volatile
+    private var ownerUsername: String? = null
+    @Volatile
     private var activeStream: InputStream? = null
 
     private val readerThread = Thread({ runLoop() }, "LinuxDoSpaceKotlinClient").apply {
@@ -72,12 +74,27 @@ class Client(
     /**
      * bindExact registers one exact mailbox binding.
      */
+    fun bindExact(prefix: String, suffix: String, allowOverlap: Boolean = false): MailBox {
+        require(prefix.isNotBlank()) { "prefix must not be blank" }
+        ensureUsable()
+        return registerBinding(
+            mode = "exact",
+            suffix = normalizeLiteralSuffix(suffix),
+            prefix = prefix.trim().lowercase(Locale.ROOT),
+            pattern = null,
+            allowOverlap = allowOverlap
+        )
+    }
+
+    /**
+     * bindExact registers one exact mailbox binding using semantic suffix constants.
+     */
     fun bindExact(prefix: String, suffix: Suffix, allowOverlap: Boolean = false): MailBox {
         require(prefix.isNotBlank()) { "prefix must not be blank" }
         ensureUsable()
         return registerBinding(
             mode = "exact",
-            suffix = suffix.value,
+            suffix = resolveBindingSuffix(suffix),
             prefix = prefix.trim().lowercase(Locale.ROOT),
             pattern = null,
             allowOverlap = allowOverlap
@@ -87,12 +104,27 @@ class Client(
     /**
      * bindPattern registers one regex mailbox binding.
      */
+    fun bindPattern(pattern: String, suffix: String, allowOverlap: Boolean = false): MailBox {
+        require(pattern.isNotBlank()) { "pattern must not be blank" }
+        ensureUsable()
+        return registerBinding(
+            mode = "pattern",
+            suffix = normalizeLiteralSuffix(suffix),
+            prefix = null,
+            pattern = Pattern.compile(pattern.trim()),
+            allowOverlap = allowOverlap
+        )
+    }
+
+    /**
+     * bindPattern registers one regex mailbox binding using semantic suffix constants.
+     */
     fun bindPattern(pattern: String, suffix: Suffix, allowOverlap: Boolean = false): MailBox {
         require(pattern.isNotBlank()) { "pattern must not be blank" }
         ensureUsable()
         return registerBinding(
             mode = "pattern",
-            suffix = suffix.value,
+            suffix = resolveBindingSuffix(suffix),
             prefix = null,
             pattern = Pattern.compile(pattern.trim()),
             allowOverlap = allowOverlap
@@ -218,7 +250,6 @@ class Client(
             }
 
             connected.set(true)
-            initialReady.countDown()
 
             response.body().use { stream ->
                 activeStream = stream
@@ -230,6 +261,9 @@ class Client(
                         }
                         handleEventLine(line)
                     }
+                }
+                if (!closed.get() && initialReady.count > 0L) {
+                    throw StreamException("mail stream ended before ready event")
                 }
                 activeStream = null
             }
@@ -243,7 +277,11 @@ class Client(
     private fun handleEventLine(line: String) {
         val event = parseFlatJson(line)
         val type = event["type"] as? String ?: ""
-        if (type == "ready" || type == "heartbeat") {
+        if (type == "ready") {
+            handleReadyEvent(event)
+            return
+        }
+        if (type == "heartbeat") {
             return
         }
         if (type != "mail") {
@@ -400,6 +438,31 @@ class Client(
                 .add(Binding(mailBox))
         }
         return mailBox
+    }
+
+    private fun handleReadyEvent(event: Map<String, Any>) {
+        val normalizedOwnerUsername = (event["owner_username"] as? String).orEmpty().trim().lowercase(Locale.ROOT)
+        if (normalizedOwnerUsername.isEmpty()) {
+            throw StreamException("ready event did not include owner_username")
+        }
+        ownerUsername = normalizedOwnerUsername
+        initialReady.countDown()
+    }
+
+    private fun resolveBindingSuffix(suffix: Suffix): String {
+        if (suffix != Suffix.LINUXDO_SPACE) {
+            return normalizeLiteralSuffix(suffix.value)
+        }
+        val normalizedOwnerUsername = ownerUsername.orEmpty().trim().lowercase(Locale.ROOT)
+        if (normalizedOwnerUsername.isEmpty()) {
+            throw StreamException("stream bootstrap did not provide owner_username required to resolve Suffix.LINUXDO_SPACE")
+        }
+        return "$normalizedOwnerUsername.${Suffix.LINUXDO_SPACE.value}"
+    }
+
+    private fun normalizeLiteralSuffix(suffix: String): String {
+        require(suffix.isNotBlank()) { "suffix must not be blank" }
+        return suffix.trim().lowercase(Locale.ROOT)
     }
 
     private fun ensureUsable() {
