@@ -29,7 +29,9 @@ class ClientSubscription internal constructor(
         if (closed.get()) {
             return null
         }
-        check(active.compareAndSet(false, true)) { "subscription already has an active consumer" }
+        if (!active.compareAndSet(false, true)) {
+            throw LinuxDoSpaceException("subscription already has an active consumer")
+        }
         try {
             val item = if (timeout.isZero) {
                 queue.poll()
@@ -87,7 +89,9 @@ class MailBox internal constructor(
         if (closed.get()) {
             return null
         }
-        check(active.compareAndSet(false, true)) { "mailbox already has an active listener" }
+        if (!active.compareAndSet(false, true)) {
+            throw LinuxDoSpaceException("mailbox already has an active listener")
+        }
         try {
             val item = if (timeout.isZero) {
                 queue.poll()

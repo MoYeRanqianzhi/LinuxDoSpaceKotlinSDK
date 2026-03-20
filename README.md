@@ -18,7 +18,6 @@ This Kotlin SDK follows the same semantics as the Python and Java SDKs:
 ## Build
 
 ```bash
-cd sdk/kotlin
 ./gradlew build
 ```
 

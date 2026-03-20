@@ -60,7 +60,7 @@ class Client(
      * listen registers one full-stream queue listener.
      */
     fun listen(): ClientSubscription {
-        checkFatalError()
+        ensureUsable()
         lateinit var subscription: ClientSubscription
         subscription = ClientSubscription {
             fullListeners.remove(subscription)
@@ -74,7 +74,7 @@ class Client(
      */
     fun bindExact(prefix: String, suffix: Suffix, allowOverlap: Boolean = false): MailBox {
         require(prefix.isNotBlank()) { "prefix must not be blank" }
-        checkFatalError()
+        ensureUsable()
         return registerBinding(
             mode = "exact",
             suffix = suffix.value,
@@ -89,7 +89,7 @@ class Client(
      */
     fun bindPattern(pattern: String, suffix: Suffix, allowOverlap: Boolean = false): MailBox {
         require(pattern.isNotBlank()) { "pattern must not be blank" }
-        checkFatalError()
+        ensureUsable()
         return registerBinding(
             mode = "pattern",
             suffix = suffix.value,
@@ -103,6 +103,7 @@ class Client(
      * route resolves current local mailbox matches for message.address.
      */
     fun route(message: MailMessage): List<MailBox> {
+        ensureUsable()
         val parts = splitAddress(message.address.lowercase(Locale.ROOT)) ?: return emptyList()
         val matches = mutableListOf<MailBox>()
         synchronized(lock) {
@@ -133,6 +134,7 @@ class Client(
                 // Best effort to unblock the reader thread.
             }
         }
+        readerThread.interrupt()
         fullListeners.forEach { it.offer(QueueSignals.CLOSE) }
         synchronized(lock) {
             bindingsBySuffix.values.forEach { chain ->
@@ -142,7 +144,11 @@ class Client(
             }
             bindingsBySuffix.clear()
         }
-        readerThread.join(options.connectTimeoutMillis + 1_000)
+        try {
+            readerThread.join(options.connectTimeoutMillis + 1_000)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     private fun awaitInitialConnection() {
@@ -396,7 +402,10 @@ class Client(
         return mailBox
     }
 
-    private fun checkFatalError() {
+    private fun ensureUsable() {
+        if (closed.get()) {
+            throw LinuxDoSpaceException("client is already closed")
+        }
         fatalError?.let { throw it }
     }
 
