@@ -32,4 +32,3 @@ Read [references/development.md](references/development.md) only when editing `s
 - Do not document a public Maven/JitPack install path that does not exist.
 - Do not describe mailbox queues as continuously buffering between `next(...)` calls.
 - Do not add hidden pre-listen mailbox buffering.
-

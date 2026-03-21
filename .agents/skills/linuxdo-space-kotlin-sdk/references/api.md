@@ -34,4 +34,3 @@
 - Full-stream messages use a primary projection address.
 - Mailbox messages use matched-recipient projection addresses.
 - Mailbox buffering is only active while `next(...)` is currently waiting.
-

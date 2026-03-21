@@ -17,4 +17,3 @@ val catchAll = client.bindPattern(".*", Suffix.LINUXDO_SPACE, true)
 ```kotlin
 val targets = client.route(message)
 ```
-

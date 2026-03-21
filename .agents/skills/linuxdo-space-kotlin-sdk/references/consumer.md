@@ -39,4 +39,3 @@ client.close()
 - Full-stream subscriptions and mailbox queues are different consumption paths.
 - Mailbox delivery is active only while `next(...)` is currently waiting.
 - `route(message)` is local matching only.
-
