@@ -1,0 +1,4 @@
+interface:
+  display_name: "LinuxDoSpace Kotlin SDK"
+  short_description: "Use or maintain the LinuxDoSpace Kotlin SDK"
+  default_prompt: "Use $linuxdo-space-kotlin-sdk when writing consumer code against sdk/kotlin or when updating the LinuxDoSpace Kotlin SDK with matching docs and validation guidance."
