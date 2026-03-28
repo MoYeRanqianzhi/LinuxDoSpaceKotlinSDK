@@ -20,7 +20,9 @@ Read [references/development.md](references/development.md) only when editing `s
    - `ClientSubscription.next(Duration)` consumes the full-stream subscription
    - `bindExact(...)` / `bindPattern(...)` create mailbox bindings locally
    - `MailBox.next(Duration)` consumes one mailbox binding
-   - `Suffix.LINUXDO_SPACE` is semantic and resolves after `ready.owner_username`
+   - `Suffix.LINUXDO_SPACE` is semantic and resolves to `<owner>-mail.<root>` after `ready.owner_username`
+   - `Suffix.LINUXDO_SPACE.withSuffix("foo")` resolves to `<owner>-mailfoo.<root>`
+   - active semantic `-mail<suffix>` registrations synchronize to `/v1/token/email/filters`
    - exact and regex bindings share one ordered chain per suffix
    - `allowOverlap=false` stops at first match; `true` continues
    - remote non-local `http://` base URLs are invalid

@@ -6,6 +6,12 @@
 val alice = client.bindExact("alice", Suffix.LINUXDO_SPACE, false)
 ```
 
+## Create one dynamic semantic mailbox
+
+```kotlin
+val alerts = client.bindExact("alerts", Suffix.LINUXDO_SPACE.withSuffix("foo"), false)
+```
+
 ## Create one catch-all
 
 ```kotlin

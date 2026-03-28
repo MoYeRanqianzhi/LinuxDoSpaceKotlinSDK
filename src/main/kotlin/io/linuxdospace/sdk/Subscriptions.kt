@@ -54,6 +54,8 @@ class ClientSubscription internal constructor(
     override fun close() {
         if (closed.compareAndSet(false, true)) {
             unregister()
+            active.set(false)
+            queue.clear()
             queue.offer(QueueSignals.CLOSE)
         }
     }
@@ -61,6 +63,11 @@ class ClientSubscription internal constructor(
 
 /**
  * MailBox is one explicit mailbox binding over the shared client stream.
+ *
+ * The concrete `suffix` value already reflects the owner-specific namespace
+ * chosen by the client, for example `<owner>-mail.linuxdo.space` or one
+ * dynamic `<owner>-mailfoo.linuxdo.space` variant derived from a semantic
+ * suffix input.
  */
 class MailBox internal constructor(
     val mode: String,
@@ -137,6 +144,8 @@ class MailBox internal constructor(
     override fun close() {
         if (closed.compareAndSet(false, true)) {
             unregister()
+            active.set(false)
+            queue.clear()
             queue.offer(QueueSignals.CLOSE)
         }
     }

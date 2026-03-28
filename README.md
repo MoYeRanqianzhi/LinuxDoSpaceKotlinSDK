@@ -13,7 +13,15 @@ This Kotlin SDK follows the same semantics as the Python and Java SDKs:
 Important:
 
 - `Suffix.LINUXDO_SPACE` is semantic, not literal
-- the SDK resolves it to `<owner_username>.linuxdo.space` after `ready.owner_username`
+- `Suffix.LINUXDO_SPACE` now defaults to the current token owner's canonical
+  mail namespace: `<owner_username>-mail.linuxdo.space`
+- `Suffix.LINUXDO_SPACE.withSuffix("foo")` resolves to
+  `<owner_username>-mailfoo.linuxdo.space`
+- active semantic `-mail<suffix>` registrations are synchronized to
+  `PUT /v1/token/email/filters`
+- if the backend still projects the legacy default alias
+  `<owner_username>.linuxdo.space`, the default semantic binding continues to
+  match it automatically
 
 ## Requirements
 
@@ -23,7 +31,7 @@ Important:
 ## Build
 
 ```bash
-./gradlew build
+gradle build
 ```
 
 ## Environment note
@@ -36,6 +44,7 @@ you should run the build in an environment where Kotlin is installed.
 
 - `Client`
 - `Suffix`
+- `SemanticSuffix`
 - `MailMessage`
 - `ClientOptions`
 - `LinuxDoSpaceException`
@@ -73,10 +82,13 @@ fun main() {
     Client("lds_pat.example").use { client ->
         val all = client.bindPattern(".*", Suffix.LINUXDO_SPACE, allowOverlap = true)
         val alice = client.bindExact("alice", Suffix.LINUXDO_SPACE)
+        val reports = client.bindExact("reports", Suffix.LINUXDO_SPACE.withSuffix("alerts"))
         val message = alice.next(Duration.ofSeconds(60))
         println(message?.subject)
+        println(reports.address)
         all.close()
         alice.close()
+        reports.close()
     }
 }
 ```

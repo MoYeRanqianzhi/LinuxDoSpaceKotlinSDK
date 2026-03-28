@@ -22,12 +22,18 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 
 /**
- * Client maintains one upstream NDJSON stream and performs local routing.
+ * Client maintains one upstream NDJSON stream, performs local routing, and
+ * keeps the backend-side dynamic `-mail<suffix>` filter list aligned with the
+ * semantic mailbox bindings currently registered in this process.
  */
 class Client(
     token: String,
     private val options: ClientOptions = ClientOptions()
 ) : AutoCloseable {
+    private companion object {
+        const val STREAM_FILTERS_PATH = "/v1/token/email/filters"
+    }
+
     private val token: String = token.trim()
     private val httpClient: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofMillis(options.connectTimeoutMillis))
@@ -36,11 +42,13 @@ class Client(
     private val closed = AtomicBoolean(false)
     private val connected = AtomicBoolean(false)
     private val lock = Any()
+    private val filterSyncLock = Any()
     private val fullListeners = CopyOnWriteArrayList<ClientSubscription>()
     private val bindingsBySuffix = linkedMapOf<String, MutableList<Binding>>()
     private val initialReady = CountDownLatch(1)
     private var initialError: LinuxDoSpaceException? = null
     private var fatalError: LinuxDoSpaceException? = null
+    private var syncedMailboxSuffixFragments: List<String>? = null
     @Volatile
     private var ownerUsername: String? = null
     @Volatile
@@ -87,9 +95,27 @@ class Client(
     }
 
     /**
-     * bindExact registers one exact mailbox binding using semantic suffix constants.
+     * bindExact registers one exact mailbox binding using semantic suffix
+     * constants such as `Suffix.LINUXDO_SPACE`, whose current canonical
+     * concrete suffix is `<owner_username>-mail.linuxdo.space`.
      */
     fun bindExact(prefix: String, suffix: Suffix, allowOverlap: Boolean = false): MailBox {
+        require(prefix.isNotBlank()) { "prefix must not be blank" }
+        ensureUsable()
+        return registerBinding(
+            mode = "exact",
+            suffix = resolveBindingSuffix(suffix),
+            prefix = prefix.trim().lowercase(Locale.ROOT),
+            pattern = null,
+            allowOverlap = allowOverlap
+        )
+    }
+
+    /**
+     * bindExact registers one exact mailbox binding using one semantic suffix
+     * plus one optional dynamic `-mail<suffix>` fragment.
+     */
+    fun bindExact(prefix: String, suffix: SemanticSuffix, allowOverlap: Boolean = false): MailBox {
         require(prefix.isNotBlank()) { "prefix must not be blank" }
         ensureUsable()
         return registerBinding(
@@ -117,9 +143,27 @@ class Client(
     }
 
     /**
-     * bindPattern registers one regex mailbox binding using semantic suffix constants.
+     * bindPattern registers one regex mailbox binding using semantic suffix
+     * constants such as `Suffix.LINUXDO_SPACE`, whose current canonical
+     * concrete suffix is `<owner_username>-mail.linuxdo.space`.
      */
     fun bindPattern(pattern: String, suffix: Suffix, allowOverlap: Boolean = false): MailBox {
+        require(pattern.isNotBlank()) { "pattern must not be blank" }
+        ensureUsable()
+        return registerBinding(
+            mode = "pattern",
+            suffix = resolveBindingSuffix(suffix),
+            prefix = null,
+            pattern = Pattern.compile(pattern.trim()),
+            allowOverlap = allowOverlap
+        )
+    }
+
+    /**
+     * bindPattern registers one regex mailbox binding using one semantic
+     * suffix plus one optional dynamic `-mail<suffix>` fragment.
+     */
+    fun bindPattern(pattern: String, suffix: SemanticSuffix, allowOverlap: Boolean = false): MailBox {
         require(pattern.isNotBlank()) { "pattern must not be blank" }
         ensureUsable()
         return registerBinding(
@@ -136,10 +180,10 @@ class Client(
      */
     fun route(message: MailMessage): List<MailBox> {
         ensureUsable()
-        val parts = splitAddress(message.address.lowercase(Locale.ROOT)) ?: return emptyList()
         val matches = mutableListOf<MailBox>()
         synchronized(lock) {
-            val chain = bindingsBySuffix[parts.suffix] ?: emptyList()
+            val parts = splitAddress(message.address.lowercase(Locale.ROOT)) ?: return emptyList()
+            val chain = resolveBindingChain(parts)
             for (binding in chain) {
                 if (!binding.mailBox.matches(parts.localPart)) {
                     continue
@@ -158,6 +202,18 @@ class Client(
             return
         }
         connected.set(false)
+        val listenerSnapshot = fullListeners.toList()
+        fullListeners.clear()
+        val mailboxSnapshot = mutableListOf<MailBox>()
+        synchronized(lock) {
+            bindingsBySuffix.values.forEach { chain ->
+                chain.forEach { binding ->
+                    mailboxSnapshot += binding.mailBox
+                }
+            }
+            bindingsBySuffix.clear()
+        }
+        syncRemoteMailboxFilters(strict = false)
         activeStream?.let { stream ->
             activeStream = null
             try {
@@ -167,15 +223,8 @@ class Client(
             }
         }
         readerThread.interrupt()
-        fullListeners.forEach { it.offer(QueueSignals.CLOSE) }
-        synchronized(lock) {
-            bindingsBySuffix.values.forEach { chain ->
-                chain.forEach { binding ->
-                    binding.mailBox.offerControl(QueueSignals.CLOSE)
-                }
-            }
-            bindingsBySuffix.clear()
-        }
+        listenerSnapshot.forEach { it.close() }
+        mailboxSnapshot.forEach { it.close() }
         try {
             readerThread.join(options.connectTimeoutMillis + 1_000)
         } catch (_: InterruptedException) {
@@ -385,9 +434,9 @@ class Client(
     }
 
     private fun dispatchToBindings(address: String, message: MailMessage) {
-        val parts = splitAddress(address) ?: return
         synchronized(lock) {
-            val chain = bindingsBySuffix[parts.suffix] ?: emptyList()
+            val parts = splitAddress(address) ?: return
+            val chain = resolveBindingChain(parts)
             for (binding in chain) {
                 if (!binding.mailBox.matches(parts.localPart)) {
                     continue
@@ -398,6 +447,34 @@ class Client(
                 }
             }
         }
+    }
+
+    /**
+     * resolveBindingChain maps actual recipient suffixes back onto semantic
+     * `Suffix.LINUXDO_SPACE` registrations when required.
+     *
+     * This keeps live dispatch and route(message) behavior identical so the
+     * caller never needs to know whether the backend projected the legacy
+     * owner-root alias or the current canonical `-mail` namespace.
+     */
+    private fun resolveBindingChain(parts: AddressParts): List<Binding> {
+        val direct = bindingsBySuffix[parts.suffix]
+        if (!direct.isNullOrEmpty()) {
+            return direct
+        }
+
+        val normalizedOwnerUsername = ownerUsername.orEmpty().trim().lowercase(Locale.ROOT)
+        if (normalizedOwnerUsername.isEmpty()) {
+            return emptyList()
+        }
+
+        val rootSuffix = Suffix.LINUXDO_SPACE.value
+        val semanticLegacySuffix = "$normalizedOwnerUsername.$rootSuffix"
+        val semanticMailSuffix = "$normalizedOwnerUsername-mail.$rootSuffix"
+        if (parts.suffix != semanticLegacySuffix) {
+            return emptyList()
+        }
+        return bindingsBySuffix[semanticMailSuffix] ?: emptyList()
     }
 
     private fun broadcastToFull(message: MailMessage) {
@@ -431,11 +508,25 @@ class Client(
                     bindingsBySuffix.remove(suffix)
                 }
             }
+            syncRemoteMailboxFilters(strict = false)
         }
         mailBox = MailBox(mode, suffix, prefix, pattern, allowOverlap, unregister)
         synchronized(lock) {
             bindingsBySuffix.computeIfAbsent(suffix) { mutableListOf() }
                 .add(Binding(mailBox))
+        }
+        try {
+            syncRemoteMailboxFilters(strict = true)
+        } catch (error: RuntimeException) {
+            synchronized(lock) {
+                val chain = bindingsBySuffix[suffix]
+                chain?.removeIf { it.mailBox === mailBox }
+                if (chain != null && chain.isEmpty()) {
+                    bindingsBySuffix.remove(suffix)
+                }
+            }
+            syncRemoteMailboxFilters(strict = false)
+            throw error
         }
         return mailBox
     }
@@ -457,12 +548,112 @@ class Client(
         if (normalizedOwnerUsername.isEmpty()) {
             throw StreamException("stream bootstrap did not provide owner_username required to resolve Suffix.LINUXDO_SPACE")
         }
-        return "$normalizedOwnerUsername.${Suffix.LINUXDO_SPACE.value}"
+        return "$normalizedOwnerUsername-mail.${Suffix.LINUXDO_SPACE.value}"
+    }
+
+    private fun resolveBindingSuffix(suffix: SemanticSuffix): String {
+        if (suffix.base != Suffix.LINUXDO_SPACE) {
+            return normalizeLiteralSuffix(suffix.base.value)
+        }
+        val normalizedOwnerUsername = ownerUsername.orEmpty().trim().lowercase(Locale.ROOT)
+        if (normalizedOwnerUsername.isEmpty()) {
+            throw StreamException("stream bootstrap did not provide owner_username required to resolve semantic Suffix.LINUXDO_SPACE")
+        }
+        return "$normalizedOwnerUsername-mail${suffix.mailSuffixFragment}.${suffix.base.value}"
     }
 
     private fun normalizeLiteralSuffix(suffix: String): String {
         require(suffix.isNotBlank()) { "suffix must not be blank" }
         return suffix.trim().lowercase(Locale.ROOT)
+    }
+
+    /**
+     * syncRemoteMailboxFilters keeps the backend-side dynamic mail suffix
+     * filter list aligned with the owner-specific mailbox suffixes currently
+     * registered in this client process.
+     */
+    private fun syncRemoteMailboxFilters(strict: Boolean) {
+        synchronized(filterSyncLock) {
+            val normalizedOwnerUsername = ownerUsername.orEmpty().trim().lowercase(Locale.ROOT)
+            if (normalizedOwnerUsername.isEmpty()) {
+                return
+            }
+
+            val fragments = collectRemoteMailboxSuffixFragments(normalizedOwnerUsername)
+            if (fragments.isEmpty() && syncedMailboxSuffixFragments == null) {
+                return
+            }
+            if (fragments == syncedMailboxSuffixFragments) {
+                return
+            }
+
+            val payload = buildFiltersPayload(fragments)
+            val request = HttpRequest.newBuilder()
+                .uri(URI.create("${options.baseUrl.trimEnd('/')}$STREAM_FILTERS_PATH"))
+                .timeout(Duration.ofMillis(options.connectTimeoutMillis))
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer $token")
+                .PUT(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                .build()
+
+            try {
+                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                if (response.statusCode() != 200) {
+                    val body = response.body().trim()
+                    throw StreamException(
+                        "unexpected mailbox filter sync status code: ${response.statusCode()}" +
+                            if (body.isEmpty()) "" else " body=$body"
+                    )
+                }
+                syncedMailboxSuffixFragments = fragments
+            } catch (error: LinuxDoSpaceException) {
+                if (strict) {
+                    throw error
+                }
+            } catch (error: Exception) {
+                if (strict) {
+                    throw StreamException("failed to synchronize remote mailbox filters", error)
+                }
+            }
+        }
+    }
+
+    private fun collectRemoteMailboxSuffixFragments(normalizedOwnerUsername: String): List<String> {
+        val suffixSnapshot = synchronized(lock) {
+            bindingsBySuffix.keys.toList()
+        }
+
+        val canonicalPrefix = "$normalizedOwnerUsername-mail"
+        val rootMarker = ".${Suffix.LINUXDO_SPACE.value}"
+        val fragments = sortedSetOf<String>()
+        suffixSnapshot.forEach { suffix ->
+            val normalizedSuffix = suffix.trim().lowercase(Locale.ROOT)
+            if (!normalizedSuffix.endsWith(rootMarker)) {
+                return@forEach
+            }
+            val label = normalizedSuffix.removeSuffix(rootMarker)
+            if ('.' in label || !label.startsWith(canonicalPrefix)) {
+                return@forEach
+            }
+            fragments += label.removePrefix(canonicalPrefix)
+        }
+        return fragments.toList()
+    }
+
+    private fun buildFiltersPayload(fragments: List<String>): String {
+        return buildString {
+            append("{\"suffixes\":[")
+            fragments.forEachIndexed { index, fragment ->
+                if (index > 0) {
+                    append(',')
+                }
+                append('"')
+                append(fragment)
+                append('"')
+            }
+            append("]}")
+        }
     }
 
     private fun ensureUsable() {

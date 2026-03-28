@@ -29,7 +29,9 @@ client.close()
 ```kotlin
 val client = Client("lds_pat...")
 val alice = client.bindExact("alice", Suffix.LINUXDO_SPACE, false)
+val alerts = client.bindExact("alerts", Suffix.LINUXDO_SPACE.withSuffix("foo"), false)
 val item = alice.next(Duration.ofSeconds(30))
+alerts.close()
 alice.close()
 client.close()
 ```
@@ -39,3 +41,6 @@ client.close()
 - Full-stream subscriptions and mailbox queues are different consumption paths.
 - Mailbox delivery is active only while `next(...)` is currently waiting.
 - `route(message)` is local matching only.
+- `Suffix.LINUXDO_SPACE` defaults to `<owner_username>-mail.linuxdo.space`.
+- `Suffix.LINUXDO_SPACE.withSuffix("foo")` derives `<owner_username>-mailfoo.linuxdo.space`.
+- The SDK synchronizes active semantic `-mail<suffix>` fragments to `/v1/token/email/filters`.
